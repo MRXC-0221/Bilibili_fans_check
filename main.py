@@ -1,16 +1,51 @@
 # -*- coding: UTF-8 -*-
 import json
 import http.client
-from pathlib import Path
+import sqlite3
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import contextmanager
 
-# 配置文件
-CONFIG_FILE = "user_config.json"
+# ====================== SQLite 数据库配置 ======================
+DB_FILE = "configs.db"
+
+# 数据库连接（安全的上下文管理）
+@contextmanager
+def get_db():
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    cursor = conn.cursor()
+    try:
+        yield cursor
+        conn.commit()
+    finally:
+        conn.close()
+
+# 初始化表
+def init_db():
+    with get_db() as c:
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS anchors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            anchor_name TEXT UNIQUE NOT NULL,
+            room TEXT NOT NULL,
+            uid TEXT NOT NULL
+        )
+        ''')
+
+        try:
+            c.execute("INSERT OR IGNORE INTO anchors (anchor_name, room, uid) VALUES (?, ?, ?)", 
+                      ("守护茶茶", "1440094", "37946996"))
+            c.execute("INSERT OR IGNORE INTO anchors (anchor_name, room, uid) VALUES (?, ?, ?)", 
+                      ("睡大觉小皮", "7291792", "2111743"))
+        except:
+            pass
+
+init_db()
+
 app = FastAPI(title="B站主播粉丝查询API")
 
-# 允许跨域（小程序必须）
+# 跨域（小程序必须）
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,59 +54,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ====================== 配置保存/加载 ======================
-def save_config(room, uid, anchor_name=""):
-    config_path = Path(CONFIG_FILE)
-    configs = []
-    if config_path.exists():
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                configs = json.load(f)
-                if not isinstance(configs, list):
-                    configs = []
-        except:
-            configs = []
-
-    exists = False
-    for config in configs:
-        if config.get("anchor_name") == anchor_name:
-            config["room"] = room
-            config["uid"] = uid
-            exists = True
-            break
-
-    if not exists:
-        configs.append({
-            "room": room,
-            "uid": uid,
-            "anchor_name": anchor_name
-        })
-
-    with open(config_path, 'w', encoding='utf-8') as f:
-        json.dump(configs, f, ensure_ascii=False)
+# ====================== SQLite 配置操作 ======================
+def save_config(room, uid, anchor_name):
+    with get_db() as c:
+        c.execute('''
+        INSERT OR REPLACE INTO anchors (anchor_name, room, uid)
+        VALUES (?, ?, ?)
+        ''', (anchor_name, room, uid))
 
 def load_config():
-    config_path = Path(CONFIG_FILE)
-    default_config = [{"room": 1440094, "uid": 37946996, "anchor_name": "守护茶茶"}]
+    with get_db() as c:
+        c.execute("SELECT anchor_name, room, uid FROM anchors")
+        rows = c.fetchall()
+        return [
+            {"anchor_name": name, "room": room, "uid": uid}
+            for name, room, uid in rows
+        ]
 
-    if not config_path.exists():
-        try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(default_config, f, ensure_ascii=False)
-            return default_config
-        except:
-            return default_config
+# 新增：根据关键词模糊搜索主播
+def search_anchor(keyword):
+    with get_db() as c:
+        # LIKE 模糊匹配，支持关键词前后任意字符
+        c.execute('''
+        SELECT anchor_name, room, uid FROM anchors
+        WHERE anchor_name LIKE ?
+        ''', (f"%{keyword}%",))
+        rows = c.fetchall()
+        return [
+            {"anchor_name": name, "room": room, "uid": uid}
+            for name, room, uid in rows
+        ]
 
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            configs = json.load(f)
-            if isinstance(configs, list) and len(configs) > 0:
-                return configs
-    except:
-        return default_config
-    return default_config
-
-# ====================== 核心查询逻辑 ======================
+# ====================== 查询逻辑（不变） ======================
 def http_request(url):
     conn = http.client.HTTPSConnection("api.live.bilibili.com")
     conn.request("GET", url)
@@ -95,7 +109,7 @@ def get_funs(user_name, ruid, flag=1):
                 if (flag == 1 and (user_name in uname or user_name == uuid)) or \
                    (flag == 0 and (user_name == uname or user_name == uuid)):
                     return data
-        except Exception as e:
+        except Exception:
             return None
     return None
 
@@ -129,11 +143,11 @@ def get_captain(user_name, roomid, ruid, flag=1):
                 if (flag == 1 and (user_name in uname or user_name == uuid)) or \
                    (flag == 0 and (user_name == uname or user_name == uuid)):
                     return data
-    except Exception as e:
+    except Exception:
         return None
     return None
 
-# ====================== API 接口 ======================
+# ====================== API 接口（含新增主播搜索） ======================
 class SearchRequest(BaseModel):
     roomid: str
     ruid: str
@@ -143,6 +157,10 @@ class SaveConfigRequest(BaseModel):
     room: str
     uid: str
     anchor_name: str
+
+# 新增：主播搜索请求模型
+class AnchorSearchRequest(BaseModel):
+    keyword: str
 
 @app.get("/api/configs")
 def api_get_configs():
@@ -157,7 +175,7 @@ def api_save_config(req: SaveConfigRequest):
 
 @app.post("/api/search")
 def api_search(req: SearchRequest):
-    """查询用户信息"""
+    """查询用户粉丝/舰长信息"""
     keyword = req.keyword.strip()
     roomid = req.roomid.strip()
     ruid = req.ruid.strip()
@@ -193,6 +211,16 @@ def api_search(req: SearchRequest):
         result["fans_rank"] = str(fans.get("user_rank", ""))
 
     return result
+
+@app.post("/api/search-anchor")
+def api_search_anchor(req: AnchorSearchRequest):
+    """模糊搜索主播配置（根据主播名）"""
+    keyword = req.keyword.strip()
+    if not keyword:
+        # 关键词为空时返回所有主播（可选逻辑，也可返回空）
+        return {"data": load_config()}
+    anchor_list = search_anchor(keyword)
+    return {"data": anchor_list}
 
 @app.get("/")
 def root():
