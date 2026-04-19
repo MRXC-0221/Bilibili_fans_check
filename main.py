@@ -32,7 +32,7 @@ def init_db():
         ''')
         try:
             c.execute("INSERT OR IGNORE INTO anchors (anchor_name, room, uid) VALUES (?, ?, ?)", 
-                      ("守护茶茶", "1440094", "37946996"))
+                      ("睡大觉小皮", "7291792", "2111743"))
         except:
             pass
 
