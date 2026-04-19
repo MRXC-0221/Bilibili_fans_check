@@ -10,7 +10,6 @@ from contextlib import contextmanager
 # ====================== SQLite 数据库配置 ======================
 DB_FILE = "configs.db"
 
-# 数据库连接（安全的上下文管理）
 @contextmanager
 def get_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -21,7 +20,6 @@ def get_db():
     finally:
         conn.close()
 
-# 初始化表
 def init_db():
     with get_db() as c:
         c.execute('''
@@ -32,12 +30,9 @@ def init_db():
             uid TEXT NOT NULL
         )
         ''')
-
         try:
             c.execute("INSERT OR IGNORE INTO anchors (anchor_name, room, uid) VALUES (?, ?, ?)", 
                       ("守护茶茶", "1440094", "37946996"))
-            c.execute("INSERT OR IGNORE INTO anchors (anchor_name, room, uid) VALUES (?, ?, ?)", 
-                      ("睡大觉小皮", "7291792", "2111743"))
         except:
             pass
 
@@ -45,7 +40,6 @@ init_db()
 
 app = FastAPI(title="B站主播粉丝查询API")
 
-# 跨域（小程序必须）
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -54,7 +48,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ====================== SQLite 配置操作 ======================
+# ====================== SQLite 配置操作（新增删除） ======================
 def save_config(room, uid, anchor_name):
     with get_db() as c:
         c.execute('''
@@ -71,10 +65,8 @@ def load_config():
             for name, room, uid in rows
         ]
 
-# 新增：根据关键词模糊搜索主播
 def search_anchor(keyword):
     with get_db() as c:
-        # LIKE 模糊匹配，支持关键词前后任意字符
         c.execute('''
         SELECT anchor_name, room, uid FROM anchors
         WHERE anchor_name LIKE ?
@@ -85,7 +77,13 @@ def search_anchor(keyword):
             for name, room, uid in rows
         ]
 
-# ====================== 查询逻辑（不变） ======================
+# 新增：删除主播配置
+def delete_anchor(anchor_name):
+    with get_db() as c:
+        c.execute("DELETE FROM anchors WHERE anchor_name = ?", (anchor_name,))
+        return c.rowcount > 0  # 删除成功返回 True
+
+# ====================== 查询逻辑 ======================
 def http_request(url):
     conn = http.client.HTTPSConnection("api.live.bilibili.com")
     conn.request("GET", url)
@@ -147,7 +145,7 @@ def get_captain(user_name, roomid, ruid, flag=1):
         return None
     return None
 
-# ====================== API 接口（含新增主播搜索） ======================
+# ====================== API 接口（新增删除接口） ======================
 class SearchRequest(BaseModel):
     roomid: str
     ruid: str
@@ -158,24 +156,24 @@ class SaveConfigRequest(BaseModel):
     uid: str
     anchor_name: str
 
-# 新增：主播搜索请求模型
 class AnchorSearchRequest(BaseModel):
     keyword: str
 
+# 新增：删除主播请求模型
+class DeleteAnchorRequest(BaseModel):
+    anchor_name: str
+
 @app.get("/api/configs")
 def api_get_configs():
-    """获取所有主播配置"""
     return {"data": load_config()}
 
 @app.post("/api/save-config")
 def api_save_config(req: SaveConfigRequest):
-    """保存主播配置"""
     save_config(req.room, req.uid, req.anchor_name)
     return {"msg": "保存成功"}
 
 @app.post("/api/search")
 def api_search(req: SearchRequest):
-    """查询用户粉丝/舰长信息"""
     keyword = req.keyword.strip()
     roomid = req.roomid.strip()
     ruid = req.ruid.strip()
@@ -214,13 +212,18 @@ def api_search(req: SearchRequest):
 
 @app.post("/api/search-anchor")
 def api_search_anchor(req: AnchorSearchRequest):
-    """模糊搜索主播配置（根据主播名）"""
     keyword = req.keyword.strip()
     if not keyword:
-        # 关键词为空时返回所有主播（可选逻辑，也可返回空）
         return {"data": load_config()}
-    anchor_list = search_anchor(keyword)
-    return {"data": anchor_list}
+    return {"data": search_anchor(keyword)}
+
+# 新增：删除主播接口
+@app.post("/api/delete-anchor")
+def api_delete_anchor(req: DeleteAnchorRequest):
+    if delete_anchor(req.anchor_name):
+        return {"msg": "删除成功"}
+    else:
+        raise HTTPException(404, "主播不存在，删除失败")
 
 @app.get("/")
 def root():
